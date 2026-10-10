@@ -1,0 +1,3 @@
+[submodule "extern/doppio"]
+	path = extern/doppio
+	url = https://github.com/Nobrac/Doppio

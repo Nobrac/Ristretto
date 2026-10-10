@@ -1,0 +1,3 @@
+LIBRARY   RistrettoFilter
+EXPORTS
+    Msv1_0SubAuthenticationFilter

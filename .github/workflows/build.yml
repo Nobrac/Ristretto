@@ -1,0 +1,37 @@
+name: build
+on: [push, pull_request]
+
+jobs:
+  msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build
+        run: .\build-ristretto.bat
+
+      # The filter is built with /WX, so a new warning in lsass-resident code
+      # fails the job rather than shipping. Nothing here tests behaviour: CI
+      # proves it compiles and exports the one symbol, no more than that.
+      - name: Check the filter exports exactly one symbol
+        shell: pwsh
+        run: |
+          $out = & dumpbin /exports RistrettoFilter.dll
+          if ($out -notmatch 'Msv1_0SubAuthenticationFilter') {
+            throw "RistrettoFilter.dll does not export Msv1_0SubAuthenticationFilter"
+          }
+          Write-Host "Export present."
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ristretto
+          path: |
+            RistrettoFilter.dll
+            ristretto.exe
