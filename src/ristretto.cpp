@@ -23,7 +23,8 @@
 // Run elevated: the secret value is ACL'd to SYSTEM + Administrators, and
 // LoadSecretKey (DPAPI, machine scope) runs in this process.
 //
-// Doppio files used, unmodified: totp.cpp, store.cpp, verify.cpp, statelock.cpp.
+// Doppio files used, unmodified: totp.cpp, store.cpp, store_index.cpp,
+// verify.cpp, statelock.cpp.
 
 #include <windows.h>
 #include "verify.h"
@@ -35,6 +36,7 @@
 #include <cstring>
 #include <cwchar>
 #include <string>
+#include <vector>
 
 #pragma comment(lib, "advapi32.lib")
 
@@ -118,11 +120,16 @@ static LSTATUS OpenProtected(const wchar_t* path, HKEY* phKey)
     return st;
 }
 
+// Same rules as the filter's ReadConfigThrottled: no readable value means the
+// default, anything else is clamped, 0 included. The old version read 0 as
+// "default" and showed 300 s where the filter allowed 30. One difference is
+// left on purpose: when WindowSec disappears, the filter keeps its last value
+// until lsass restarts. This tool cannot see that value and shows the default.
 static DWORD CurrentWindowSec()
 {
     DWORD v = 0, cb = sizeof(v);
     if (RegGetValueW(HKEY_LOCAL_MACHINE, kConfigPath, L"WindowSec",
-                     RRF_RT_REG_DWORD, nullptr, &v, &cb) != ERROR_SUCCESS || !v)
+                     RRF_RT_REG_DWORD, nullptr, &v, &cb) != ERROR_SUCCESS)
         return kWindowDefault;
     if (v < kWindowMin) v = kWindowMin;
     if (v > kWindowMax) v = kWindowMax;
@@ -228,9 +235,12 @@ static int Open(const wchar_t* user, const wchar_t* codeArg)
     GateLog(EVENTLOG_INFORMATION_TYPE, 300,
             std::wstring(L"Gate opened for '") + user + L"' (RID " + std::to_wstring(rid) +
             L") for " + std::to_wstring(window) + L" s.");
+    // The filter only runs when a logon is made. A share mapped or a WinRM
+    // session opened inside the window stays up after it closes, so say so.
     wprintf(L"Gate open for '%s' for %lu s.\n"
             L"Anyone who can authenticate as this account passes while the window lasts -\n"
-            L"close it with /close when you are done.\n",
+            L"close it with /close when you are done. Closing stops new logons only:\n"
+            L"a session that is already up stays up until it disconnects.\n",
             user, static_cast<unsigned long>(window));
     return 0;
 }
@@ -251,6 +261,24 @@ static int Status(const wchar_t* user)
     if (!mode)
         wprintf(L"WARNING: Mode = 0, enforcement is off. The filter lets every network "
                 L"logon through regardless of the gate.\n");
+
+    // The filter only gates accounts in Doppio's RID index. Without this
+    // check, /status said "gate closed" for an account the filter lets
+    // through anyway, for example after enrolling without enroll /reindex.
+    switch (tac::EnrollmentByRid(rid))
+    {
+    case tac::Enrollment::No:
+        wprintf(L"'%s' is not in Doppio's RID index, so the filter does not gate it at all. "
+                L"Run enroll /reindex if it should be gated.\n", user);
+        return 0;
+    case tac::Enrollment::Unknown:
+        wprintf(L"Doppio's RID index could not be read. The filter refuses every network "
+                L"logon for '%s' until it can.\n", user);
+        return 1;
+    case tac::Enrollment::Yes:
+    default:
+        break;
+    }
 
     WCHAR value[16];
     swprintf_s(value, L"%lu", static_cast<unsigned long>(rid));
@@ -289,12 +317,16 @@ static int Close(const wchar_t* user)
     if (ok)
         GateLog(EVENTLOG_INFORMATION_TYPE, 302,
                 std::wstring(L"Gate closed for '") + user + L"'.");
-    wprintf(ok ? L"closed\n" : L"close failed\n");
+    wprintf(ok ? L"closed. Sessions that are already up stay up.\n" : L"close failed\n");
     return ok ? 0 : 1;
 }
 
 // Panic button: drop every open gate at once without having to remember who
-// is enrolled.
+// is enrolled. It always reads index 0 and deletes that value until the key
+// is empty. Deleting while enumerating upwards shifts the indices, and the old
+// fixed list of 256 names of up to 31 characters stopped early on a long name
+// or a full list, then logged "All gates closed" anyway. The buffer takes the
+// longest value name the registry allows, and any error is reported.
 static int CloseAll()
 {
     HKEY k = nullptr;
@@ -304,25 +336,37 @@ static int CloseAll()
         return 1;
     }
 
-    // Collect first, delete after: deleting while enumerating shifts indices.
-    std::wstring names[256];
-    DWORD count = 0;
-    for (DWORD i = 0; count < ARRAYSIZE(names); ++i)
-    {
-        WCHAR name[32]; DWORD cch = ARRAYSIZE(name);
-        if (RegEnumValueW(k, i, name, &cch, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS)
-            break;
-        names[count++] = name;
-    }
+    std::vector<WCHAR> name(16384);        // 16,383 characters + terminator
     DWORD closed = 0;
-    for (DWORD i = 0; i < count; ++i)
-        if (RegDeleteValueW(k, names[i].c_str()) == ERROR_SUCCESS)
-            ++closed;
+    LSTATUS st = ERROR_SUCCESS;
+    for (;;)
+    {
+        DWORD cch = static_cast<DWORD>(name.size());
+        st = RegEnumValueW(k, 0, name.data(), &cch, nullptr, nullptr, nullptr, nullptr);
+        if (st != ERROR_SUCCESS)
+            break;
+        st = RegDeleteValueW(k, name.data());
+        if (st != ERROR_SUCCESS)
+            break;
+        ++closed;
+    }
     RegCloseKey(k);
+
+    if (st != ERROR_NO_MORE_ITEMS)
+    {
+        GateLog(EVENTLOG_WARNING_TYPE, 302,
+                L"Closing all gates stopped after " + std::to_wstring(closed) +
+                L" with error " + std::to_wstring(st) + L". Gates may still be open.");
+        wprintf(L"closed %lu gate(s), then stopped with error %ld. Gates may still be open,\n"
+                L"check HKLM\\%s by hand.\n",
+                static_cast<unsigned long>(closed), static_cast<long>(st), kGatePath);
+        return 1;
+    }
 
     GateLog(EVENTLOG_INFORMATION_TYPE, 302,
             L"All gates closed (" + std::to_wstring(closed) + L").");
-    wprintf(L"closed %lu gate(s)\n", static_cast<unsigned long>(closed));
+    wprintf(L"closed %lu gate(s). Sessions that are already up stay up.\n",
+            static_cast<unsigned long>(closed));
     return 0;
 }
 

@@ -11,7 +11,8 @@ enrollment index read-only and verifies one-time codes through Doppio's own
 store, no second enrollment.
 
 Blog series at <https://theadmincafe.ch>: Part 1 (credential provider),
-Part 2 (inside LSA), Part 3 (this). The article is in `docs/` as well.
+Part 2 (inside LSA), Part 3 (this), at
+<https://theadmincafe.ch/p/windows-2fa-gating-network-logons/>.
 
 > **Test-VM code.** Unsigned, needs `RunAsPPL` off, runs inside `lsass.exe`.
 > Same ground rules as Doppio: throwaway VM, snapshot before every reboot,
@@ -86,8 +87,10 @@ gate fresh?                    → no  → veto
 
 The veto is `STATUS_INVALID_WORKSTATION`, the same code Doppio's filter
 returns, so from MSV1_0's side nothing about the refusal changed — only the
-condition in front of it. In the Security log a refusal is a failed 4625 with
-status `0xC0000070`. `WhichFields`, `UserFlags` and `Authoritative` are
+condition in front of it. In the Security log a refusal is a failed 4625.
+MSV1_0 reports `STATUS_INVALID_WORKSTATION` as the sub-status of an account
+restriction, so expect Sub Status `0xC0000070`, most likely under Status
+`0xC000006E`; check both fields in the VM. `WhichFields`, `UserFlags` and `Authoritative` are
 written on every path, as the documentation of
 `Msv1_0SubAuthenticationFilter` asks; `SECURITY-FIXES.md`, item 15, has the
 details.
@@ -155,12 +158,19 @@ least once so the RID index exists. The installer refuses without it.
 .\install-ristretto.ps1
 ```
 
-It checks that Doppio is there, that `RunAsPPL` is off, and that `Auth0`
-belongs to `TacSubAuth` or to nobody — it will not take the slot from another
-product's filter. It saves what was there, hardens the config and gate keys
-before writing anything into them, copies `RistrettoFilter.dll` to System32,
-puts `ristretto.exe` next to `TacProvider.dll`, and sets `Auth0` last, once the
-DLL is actually on disk. It asks you to confirm first. Reboot to load it.
+It checks that Doppio is there, that the machine is not a domain controller,
+that LSA protection is off (`RunAsPPL`, `RunAsPPLBoot` and WinInit event 12
+since the last boot), and that `Auth0` belongs to `TacSubAuth` or to nobody —
+it will not take the slot from another product's filter. It saves what was
+there, hardens the config and gate keys before writing anything into them,
+copies `RistrettoFilter.dll` to System32, puts `ristretto.exe` next to
+`TacProvider.dll`, and sets `Auth0` last, once the DLL is actually on disk. It
+asks you to confirm first. Reboot to load it.
+
+Running it a second time keeps the config, the open gates and the record of
+what `Auth0` was. An older version lost all three on a second run and then
+recorded `RistrettoFilter` as the filter to restore; both scripts now refuse
+to go on while `PrevAuth0` says `RistrettoFilter` and tell you how to fix it.
 
 ```text
 ristretto <user> [code]     open the network gate (TOTP check)
@@ -171,8 +181,13 @@ ristretto /window <sec>     gate lifetime, 30-3600 (default 300)
 ristretto /mode gate|off    enforcement kill switch, no reboot
 ```
 
+Closing a gate, by hand or when the window runs out, stops new logons only.
+A share mapped or a WinRM session opened inside the window stays up until it
+disconnects; `Close-SmbSession` on the protected machine ends SMB sessions.
+
 Pass the code as an argument only in a script — it ends up in the command
-line, in 4688 audit records and in your shell history. The tool says so when
+line, in your shell history and, with command-line process auditing on, in
+4688 records. The tool says so when
 you do it.
 
 **First thing to check in the VM:** attach a kernel debugger and watch for
@@ -217,7 +232,7 @@ install-ristretto.ps1       registration, with the guards
 uninstall-ristretto.ps1     deregistration, Auth0 restored first
 SECURITY-FIXES.md           the audit findings and what each fix was for
 tests/                      behaviour test of the filter (Linux, ASan/UBSan)
-docs/                       the blog article
+docs/                       a pointer to the blog article
 extern/                     the pinned Doppio submodule
 ```
 

@@ -88,10 +88,13 @@ the registry, the others keep using cached values and never block).
 
 ## 6. Filter: CRT on the logon path — **fixed**
 
-`_time64` and `swprintf_s` pull locale machinery, and locale machinery
-touches the heap — against the file's own stated rules. Time now comes from
-`GetSystemTimeAsFileTime` converted to unix seconds, which is the identical
-value `_time64(nullptr)` returns. `ristretto.exe` uses the same conversion so
+`swprintf_s` pulls locale machinery, and locale machinery touches the heap —
+against the file's own stated rules. `_time64` does not: it calls
+`GetSystemTimeAsFileTime` and converts. It still is CRT code on the logon
+path, which the file rules out. Time now comes from `GetSystemTimeAsFileTime`
+directly, converted to unix seconds, which is the identical value
+`_time64(nullptr)` returns. (An earlier version of this item said `_time64`
+pulls locale machinery as well. It doesn't.) `ristretto.exe` uses the same conversion so
 the two sides cannot disagree about what "now" means.
 
 ## 7. Filter: success logging leaked account names — **fixed**
@@ -113,6 +116,10 @@ at all.
 Now stores a `__none__` sentinel and the uninstaller removes the value
 instead. The marker is also cleared on uninstall, so a reinstall records the
 real previous state rather than reusing ours.
+
+This fix had a hole of its own, found later: see item 16. A second run of the
+installer without an uninstall in between wiped the marker and recorded
+`RistrettoFilter`.
 
 ## 9. Installer: config key inherited its ACL — **fixed**
 
@@ -156,7 +163,9 @@ than to drop `/WX` — a warning in *this* code should still stop the build.
 ## 13. TOTP code on the command line — **noted, not removed**
 
 `ristretto <user> <code>` leaves the code in the process command line, which
-any process can read, and in 4688 audit records and shell history. The code
+other processes with enough access to it can read, in shell history, and in
+4688 audit records when "Include command line in process creation events" is
+on (it is off by default). The code
 is single-use and burned immediately, so the window is small. The argument
 stays for scripted use; the tool now prints a note recommending the prompt.
 
@@ -188,8 +197,11 @@ Doppio's second review compared its filter with the documentation of
 - **Veto code.** The documentation lists the values the function "must
   return". `STATUS_ACCOUNT_RESTRICTION` is not one of them;
   `STATUS_INVALID_WORKSTATION` is, and it says what the gate means. A refused
-  logon shows a different error text now; the 4625 in the Security log
-  carries `0xC0000070`.
+  logon shows a different error text now. In the Security log, MSV1_0
+  reports `STATUS_INVALID_WORKSTATION` as the sub-status of an account
+  restriction, so the 4625 most likely shows Sub Status `0xC0000070` under
+  Status `0xC000006E`. An earlier version of this item said Status
+  `0xC0000070`; check both fields in the VM.
 - **Out-parameters.** `WhichFields`, `UserFlags` and `Authoritative` are
   `[out]`, and `Authoritative` "should return valid information regardless of
   the return value". The filter set it only on a refusal and never touched
@@ -203,6 +215,42 @@ Doppio's second review compared its filter with the documentation of
 
 `tests/` runs the real filter against fakes on Linux and covers all three,
 plus the gate, the window bounds, the kill switch and the fail-closed paths.
+
+## 16. Installer, uninstaller and gate tool, third review — **fixed**
+
+A review of Part 3 against the code and the documentation found these:
+
+- **A second install run lost the restore record (high).** The installer
+  called `New-Item -Force` on the config key and the gate key. In
+  PowerShell's registry provider, `-Force` on a key that exists deletes the
+  key with all its values and subkeys and creates it again. A second run
+  therefore lost `PrevAuth0`, `Mode`, `WindowSec` and every open gate, then
+  recorded the current `Auth0`, `RistrettoFilter`, as the filter to restore.
+  The uninstaller then "restored" Ristretto, and Doppio's `TacSubAuth` never
+  came back. This happened before the DLL copy, so even a run that failed
+  there left the wrong record. The keys are now only created when missing.
+  Both scripts refuse to go on while `PrevAuth0` is `RistrettoFilter`, and the
+  installer refuses when `Auth0` is already Ristretto but the record is gone.
+- **LSA protection was checked through one registry value (medium).** The
+  installer now also checks `RunAsPPLBoot`, WinInit event 12 since the last
+  boot, and refuses on a domain controller, the same checks Doppio's
+  `install-subauth.ps1` has. Before, a protected lsass meant a clean-looking
+  install and a filter that never loaded.
+- **Closing a gate does not end sessions (medium, documentation).** The filter
+  only runs when a logon is made. A session opened inside the window stays up
+  after `/close` or after the window runs out. The tool and the README now say
+  so.
+- **`/status` ignored the RID index (low).** It said "gate closed" for an
+  account the filter does not gate at all. It now asks `tac::EnrollmentByRid`
+  first.
+- **`WindowSec = 0` (low).** The tool read 0 as the 300 s default; the filter
+  clamps it to 30. The tool now clamps the same way.
+- **`/closeall` could stop early (low).** A fixed list of 256 names of up to
+  31 characters ended the loop on a long name or a full list, and the event
+  still said "All gates closed". It now deletes index 0 until the key is
+  empty, with room for the longest value name, and reports any error.
+- **The uninstaller overwrote `Auth0` unchecked (low).** It now only restores
+  the slot while it still says `RistrettoFilter`, and warns otherwise.
 
 ---
 
