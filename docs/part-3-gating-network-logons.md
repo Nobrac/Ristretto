@@ -382,7 +382,7 @@ nothing else.
 
 And the one that is not a limit of this code but of the idea: if you want an
 actual second factor on every network logon, the gate is not it. That lives in
-the SSP/AP, done properly, which is still the Part 3 I owe you.
+the SSP/AP, done properly, which is still the part I owe you.
 
 ## Build and install
 

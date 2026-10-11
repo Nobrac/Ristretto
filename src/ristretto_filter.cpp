@@ -407,8 +407,9 @@ NTSTATUS NTAPI Msv1_0SubAuthenticationFilter(
 
     // Anything that is not a network logon is out of scope, including the
     // interactive path Doppio's credential provider already owns. Leave
-    // *Authoritative untouched there: we have no opinion, and claiming
-    // authority would cut other filters out of the chain.
+    // *Authoritative as MSV1_0 passed it in there: we have no opinion.
+    // (FALSE would let the request be retried on another domain controller;
+    // a refusal below sets TRUE so it stays final.)
     if (!isNetwork)
         return STATUS_SUCCESS;
 
