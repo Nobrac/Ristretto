@@ -114,10 +114,29 @@ namespace
     };
 
     // RID as a decimal string, same convention as Doppio's 2FA\Rids values.
+    //
+    // Written out longhand rather than through Buf on purpose. Buf terminates
+    // correctly, but /analyze cannot see that across the call and reports
+    // C6054 ("might not be zero-terminated") at every use of the result. With
+    // /WX that ends the build, and silencing a not-terminated warning in code
+    // that runs inside lsass is the wrong habit to get into - so the
+    // termination is made obvious here instead.
+    //
+    // A ULONG is at most 10 digits (4294967295), so out[12] always fits the
+    // digits plus the terminator.
     void RidToValueName(ULONG rid, WCHAR (&out)[12])
     {
-        Buf b(out, 12);
-        b.U64(rid);
+        WCHAR digits[10];
+        int n = 0;
+        do
+        {
+            digits[n++] = (WCHAR)(L'0' + (ULONG)(rid % 10));
+            rid /= 10;
+        } while (rid != 0 && n < 10);
+
+        int i = 0;
+        while (n > 0) out[i++] = digits[--n];
+        out[i] = L'\0';                       // i <= 10, so this is in bounds
     }
 
     // ---- time --------------------------------------------------------
@@ -191,7 +210,7 @@ namespace
         if (st != ERROR_SUCCESS)
             return Enroll::Unknown;
 
-        WCHAR value[12];
+        WCHAR value[12] = {};
         RidToValueName(rid, value);
 
         st = RegQueryValueExW(k, value, nullptr, nullptr, nullptr, nullptr);
@@ -207,7 +226,7 @@ namespace
     {
         ageSec = 0;
 
-        WCHAR value[12];
+        WCHAR value[12] = {};
         RidToValueName(rid, value);
 
         ULONGLONG ts = 0;
@@ -289,6 +308,27 @@ namespace
         b.U64(ageSec);
         b.Str(L" s ago or none).");
         Report(EVENTLOG_WARNING_TYPE, 301, text);
+    }
+
+    // Which exceptions the filter swallows.
+    //
+    // A constant EXCEPTION_EXECUTE_HANDLER would catch everything, and
+    // /analyze is right to flag that (C6320): some exceptions must not be
+    // handled. A stack overflow is the clear case - the guard page is gone by
+    // the time the filter runs, so continuing on that thread is worse than
+    // letting it go. Everything else here means a bad pointer from the
+    // caller, and on that one the bugcheck is the worse outcome, so it is
+    // caught and the logon refused.
+    LONG DecisionFilter(DWORD code)
+    {
+        switch (code)
+        {
+        case EXCEPTION_STACK_OVERFLOW:
+        case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+            return EXCEPTION_CONTINUE_SEARCH;   // not ours to survive
+        default:
+            return EXCEPTION_EXECUTE_HANDLER;
+        }
     }
 
     // The actual decision. Split out so the __try frame in the exported
@@ -382,7 +422,7 @@ NTSTATUS NTAPI Msv1_0SubAuthenticationFilter(
     {
         result = Decide(UserAll);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER)
+    __except (DecisionFilter(GetExceptionCode()))
     {
         Report(EVENTLOG_ERROR_TYPE, 303,
                L"Unhandled exception while deciding a network logon - refusing (fail closed).");

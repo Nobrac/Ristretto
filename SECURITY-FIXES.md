@@ -146,6 +146,13 @@ Added `/Qspectre` (relevant for code sharing an address space with secrets),
 `/DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA`, and `/WX` on the filter so a new
 warning in lsass-resident code fails the build rather than shipping.
 
+`/WX` plus `/analyze` then failed on the Windows SDK itself: `bcrypt.h`
+declares `PNTSTATUS` without SAL annotations and `ntsecapi.h` declares it
+again with them, which raises C28301 from inside Microsoft's header. The fix
+is to keep system headers out of analysis (`/analyze:external-`,
+`/external:anglebrackets /external:W0`, plus `/wd28301` as a backstop) rather
+than to drop `/WX` — a warning in *this* code should still stop the build.
+
 ## 13. TOTP code on the command line — **noted, not removed**
 
 `ristretto <user> <code>` leaves the code in the process command line, which
