@@ -36,7 +36,7 @@ sessions, minus the cloud.
 ristretto alice            →  TOTP checked, timestamp written
 net use \\host\share       →  filter sees a fresh gate, no objection
 ...5 minutes later...
-net use \\host\share       →  gate stale, STATUS_ACCOUNT_RESTRICTION
+net use \\host\share       →  gate stale, STATUS_INVALID_WORKSTATION
 ```
 
 ## Read this before you decide it is what you want
@@ -78,20 +78,28 @@ The filter asks four questions per logon, in this order, and three of them
 exit to "no objection" at the cost of one registry read at most:
 
 ```
-network logon?  → no  → no objection
-enforcement on? → off → no objection
-enrolled (RID)? → no  → no objection   (unreadable index → refuse)
-gate fresh?     → no  → veto
+network logon to this machine? → no  → no objection   (pass-through counts as no)
+enforcement on?                → off → no objection
+enrolled (RID)?                → no  → no objection   (unreadable index → refuse)
+gate fresh?                    → no  → veto
 ```
 
-The veto is the same `STATUS_ACCOUNT_RESTRICTION` Doppio's filter returns, so
-from MSV1_0's side nothing about the refusal changed — only the condition in
-front of it.
+The veto is `STATUS_INVALID_WORKSTATION`, the same code Doppio's filter
+returns, so from MSV1_0's side nothing about the refusal changed — only the
+condition in front of it. In the Security log a refusal is a failed 4625 with
+status `0xC0000070`. `WhichFields`, `UserFlags` and `Authoritative` are
+written on every path, as the documentation of
+`Msv1_0SubAuthenticationFilter` asks; `SECURITY-FIXES.md`, item 15, has the
+details.
+
+The enrollment check is Doppio's own `tac::EnrollmentByRid` from
+`store_index.cpp`, linked into the DLL. That file holds the index reads and
+nothing else: no DPAPI, no account lookups, no heap.
 
 ### One lockout, not two
 
-`ristretto.exe` links Doppio's `totp.cpp`, `store.cpp`, `verify.cpp` and
-`statelock.cpp` **unmodified**, as a pinned submodule. That is not laziness —
+`ristretto.exe` links Doppio's `totp.cpp`, `store.cpp`, `store_index.cpp`,
+`verify.cpp` and `statelock.cpp` **unmodified**, as a pinned submodule. That is not laziness —
 it is the only way the lockout stays honest. A separate failure counter would
 give an attacker two independent sets of guesses against the same secret.
 
@@ -119,9 +127,24 @@ build-ristretto.bat
 From the **x64 Native Tools Command Prompt** — a plain `cmd` has neither
 `cl.exe` nor the SDK headers on the PATH.
 
-The filter is built with `/MT /O2 /guard:cf /Qspectre /W4 /WX /sdl /analyze`
-and linked `/DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA`. `/WX` is deliberate: a new
-warning in code that lives inside lsass should fail the build, not ship.
+The filter is built with `/MT /O2 /guard:cf /Qspectre /W4 /WX /sdl` and
+linked `/CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA`. `/WX` is
+deliberate: a new warning in code that lives inside lsass should fail the
+build, not ship. `/analyze` runs as a second, advisory pass.
+
+### Tests
+
+```text
+make -C tests
+```
+
+On Linux with g++, under AddressSanitizer and UBSan. The test compiles the
+real `src/ristretto_filter.cpp` and Doppio's `store_index.cpp` against fakes
+for the registry, the clock and the debugger output, and calls the exported
+function the way MSV1_0 would: scope, pass-through, the gate and its edges,
+the window bounds, the kill switch, the fail-closed paths and the
+out-parameters. It cannot show how MSV1_0 really calls the filter, and SEH is
+mapped to `try`/`catch`. CI runs it on every push.
 
 ## Install
 
@@ -193,6 +216,7 @@ build-ristretto.bat         both binaries
 install-ristretto.ps1       registration, with the guards
 uninstall-ristretto.ps1     deregistration, Auth0 restored first
 SECURITY-FIXES.md           the audit findings and what each fix was for
+tests/                      behaviour test of the filter (Linux, ASan/UBSan)
 docs/                       the blog article
 extern/                     the pinned Doppio submodule
 ```

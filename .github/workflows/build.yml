@@ -17,8 +17,8 @@ jobs:
         run: .\build-ristretto.bat
 
       # The filter is built with /WX, so a new warning in lsass-resident code
-      # fails the job rather than shipping. Nothing here tests behaviour: CI
-      # proves it compiles and exports the one symbol, no more than that.
+      # fails the job rather than shipping. This job proves it compiles and
+      # exports the one symbol; the tests job below covers behaviour.
       - name: Check the filter exports exactly one symbol
         shell: pwsh
         # dumpbin returns an array of lines, and -match/-notmatch on an array
@@ -45,3 +45,15 @@ jobs:
           path: |
             RistrettoFilter.dll
             ristretto.exe
+
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      # The real filter and Doppio's store_index.cpp against fakes, under
+      # AddressSanitizer and UBSan. See tests/test_filter.cpp for what it
+      # can and cannot show.
+      - name: Filter behaviour test
+        run: make -C tests

@@ -92,9 +92,12 @@ static void GateLog(WORD type, DWORD id, const std::wstring& text)
     }
 }
 
-// store.cpp's OpenProtectedKey is static; this is an intentional copy.
-// Creates or opens a key below HKLM with the protected ACL, and re-applies
-// the ACL on existing keys the same way Doppio does.
+// store.cpp's OpenProtectedKey is static; this is an intentional copy, taken
+// from Doppio 2776655. Creates or opens a key below HKLM with the protected
+// ACL, and re-applies the ACL on existing keys. Doppio's own OpenProtectedKey
+// stopped re-applying it in 37a827d, because Doppio's SaveState runs on the
+// logon path; its enroll.exe repairs the ACL once per run instead. This tool
+// is a console tool like enroll.exe, so the repair stays here on purpose.
 static LSTATUS OpenProtected(const wchar_t* path, HKEY* phKey)
 {
     PSECURITY_DESCRIPTOR psd = nullptr;

@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 578" width="900" height="578"
-     role="img" aria-label="The filter's decision path. MSV1_0 has checked the password and calls the filter. A logon that is not a network logon gets no objection. Inside a __try frame: with the kill switch Mode = 0 there is no objection; an account that is not enrolled, or a machine without Doppio's index, gets no objection; a failed read of the index is a veto. An enrolled account passes only with a fresh gate; a missing, stale or future timestamp is a veto. An exception in the decision is a veto as well. A veto returns STATUS_ACCOUNT_RESTRICTION with Authoritative set to TRUE, no objection returns STATUS_SUCCESS.">
+     role="img" aria-label="The filter's decision path. MSV1_0 has checked the password and calls the filter. A logon that is not a network logon to this machine gets no objection, and a pass-through logon counts as not to this machine. Inside a __try frame: with the kill switch Mode = 0 there is no objection; an account that is not enrolled, or a machine without Doppio's index, gets no objection; a failed read of the index is a veto. An enrolled account passes only with a fresh gate; a missing, stale or future timestamp is a veto. An exception in the decision is a veto as well. A veto returns STATUS_INVALID_WORKSTATION and shows as a 4625 with status 0xC0000070, no objection returns STATUS_SUCCESS. On every path, before any return, the filter sets WhichFields and UserFlags to 0 and Authoritative to TRUE.">
   <style>
     text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif; }
     .m { font-family: ui-monospace, "SFMono-Regular", "Cascadia Mono", Menlo, Consolas, monospace; }
@@ -65,12 +65,12 @@
   <rect class="frame" x="284.0" y="180" rx="4" width="332" height="276"/>
   <text class="m muted" x="608.0" y="195" font-size="10" text-anchor="end">__try: Decide()</text>
   <rect class="box" x="300.0" y="96" rx="3" width="300" height="58"/>
-  <text class="ink" x="316.0" y="120" font-size="12">Network logon?</text>
-  <text class="m muted" x="316.0" y="139" font-size="10">LogonLevel</text>
+  <text class="ink" x="316.0" y="120" font-size="12">Network logon to this machine?</text>
+  <text class="m muted" x="316.0" y="139" font-size="10">LogonLevel, Flags &amp; MSV1_0_PASSTHRU</text>
   <line class="wire" x1="450" y1="154" x2="450" y2="202" marker-end="url(#a)"/>
   <text class="muted" x="458" y="169" font-size="10" text-anchor="start">yes</text>
   <line class="wire" x1="600.0" y1="125.0" x2="780" y2="125.0"/>
-  <text class="muted" x="630.0" y="118.0" font-size="10" text-anchor="start">no</text>
+  <text class="muted" x="630.0" y="118.0" font-size="10" text-anchor="start">no, or pass-through</text>
   <circle class="dot" cx="780" cy="125.0" r="2.5"/>
   <rect class="box" x="300.0" y="206" rx="3" width="300" height="58"/>
   <text class="ink" x="316.0" y="230" font-size="12">Enforcement on?</text>
@@ -107,10 +107,13 @@
   <line class="wireacc" x1="120" y1="325.0" x2="120" y2="492" marker-end="url(#b)"/>
   <rect class="boxacc" x="20" y="496" rx="3" width="260" height="62"/>
   <text class="accent" x="36" y="519" font-size="12.5">Veto</text>
-  <text class="m muted" x="36" y="537" font-size="10">STATUS_ACCOUNT_RESTRICTION</text>
-  <text class="m muted" x="36" y="551" font-size="10">Authoritative = TRUE</text>
+  <text class="m muted" x="36" y="537" font-size="10">STATUS_INVALID_WORKSTATION</text>
+  <text class="muted" x="36" y="551" font-size="10">4625 with status 0xC0000070</text>
   <rect class="box" x="620" y="496" rx="3" width="260" height="62"/>
   <text class="ink" x="636" y="519" font-size="12.5">No objection</text>
   <text class="m muted" x="636" y="537" font-size="10">STATUS_SUCCESS</text>
   <text class="muted" x="636" y="551" font-size="10">MSV1_0 builds the token</text>
+  <text class="muted" x="450" y="519" font-size="10" text-anchor="middle">either way, before any return</text>
+  <text class="m muted" x="450" y="537" font-size="10" text-anchor="middle">WhichFields = 0, UserFlags = 0</text>
+  <text class="m muted" x="450" y="551" font-size="10" text-anchor="middle">Authoritative = TRUE</text>
 </svg>
