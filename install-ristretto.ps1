@@ -59,14 +59,54 @@ $msvKey = "$lsaKey\MSV1_0"
 $cfgPathRel = 'SOFTWARE\TheAdminCafe\Ristretto'
 $cfg    = "HKLM:\$cfgPathRel"
 
-$ppl = (Get-ItemProperty $lsaKey -Name RunAsPPL -ErrorAction SilentlyContinue).RunAsPPL
-if ($ppl) { throw "RunAsPPL is on - the unsigned filter will never load. Set it to 0 on the test VM." }
+# A domain controller keeps its accounts in the directory, not in a local SAM.
+# Doppio's RID index only knows local accounts, so on a DC the filter would
+# check domain RIDs against it. install-subauth.ps1 refuses for the same reason.
+# DomainRole 4 = backup DC, 5 = primary DC.
+if ((Get-CimInstance Win32_ComputerSystem).DomainRole -ge 4) {
+    throw "This is a domain controller. The filter only knows local accounts by RID; on a DC it would check domain RIDs against Doppio's index. Refusing."
+}
+
+# With LSA protection on, lsass only loads plug-ins with a Microsoft LSA
+# signature, and this DLL has none. Without these checks the install looked
+# fine, Auth0 changed, and the filter simply never loaded.
+$lsaProps = Get-ItemProperty -Path $lsaKey
+if ($lsaProps.RunAsPPL -or $lsaProps.RunAsPPLBoot) {
+    throw "LSA protection (RunAsPPL or RunAsPPLBoot) is on - the unsigned filter will never load. Turn it off in the test VM first."
+}
+
+# The registry values are not the whole story: a UEFI variable or Windows' own
+# default for new Windows 11 devices can turn LSA protection on as well. The
+# proof at runtime is WinInit event 12, "LSASS.exe was started as a protected
+# process with level: 4", in the System log. Event ID 12 is used by other
+# sources too, hence the provider check.
+$boot = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+$pplEvent = Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 12; StartTime = $boot } -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProviderName -like '*Wininit*' } | Select-Object -First 1
+if ($pplEvent) {
+    throw "lsass runs as a protected process since the last boot (WinInit event 12). It will not load the unsigned filter. Turn LSA protection off in the test VM first."
+}
 
 if (-not (Test-Path $msvKey)) { throw "$msvKey does not exist. Wrong machine?" }
 
 $cur = (Get-ItemProperty $msvKey -Name Auth0 -ErrorAction SilentlyContinue).Auth0
 if ($cur -and $cur -notin @('TacSubAuth', 'RistrettoFilter')) {
     throw "Auth0 belongs to '$cur'. Not touching another product's filter."
+}
+
+# What the uninstaller will restore. Checked here, before anything changes.
+# An older version of this script wiped the config key on a second run (see
+# below) and then recorded its own name, so the uninstaller "restored"
+# Ristretto and Doppio's TacSubAuth never came back.
+$prevRecorded = $null
+if (Test-Path $cfg) {
+    $prevRecorded = (Get-ItemProperty $cfg -Name PrevAuth0 -ErrorAction SilentlyContinue).PrevAuth0
+}
+if ($prevRecorded -eq 'RistrettoFilter') {
+    throw "PrevAuth0 under $cfg is 'RistrettoFilter', left by an older version of this script. Set it to what Auth0 was before Ristretto ('TacSubAuth' for Doppio's filter, '$noPrev' for none) and run this again."
+}
+if ($cur -eq 'RistrettoFilter' -and -not $prevRecorded) {
+    throw "Auth0 is already 'RistrettoFilter', but PrevAuth0 under $cfg is missing, so there is no record of what to restore. Set PrevAuth0 ('TacSubAuth' or '$noPrev') and run this again."
 }
 
 Write-Host ""
@@ -90,9 +130,13 @@ if ($Confirmed) {
 
 # --- config key, hardened before anything is written into it ---------------
 
-New-Item $cfg -Force | Out-Null
+# Create the keys only when they are missing. New-Item -Force on a registry
+# key that exists does not open it: the registry provider deletes the key with
+# all its values and subkeys and creates it again. That is how a second run
+# used to lose PrevAuth0, Mode, WindowSec and every open gate.
+if (-not (Test-Path $cfg)) { New-Item $cfg | Out-Null }
 Set-KeyAclHard -SubKey $cfgPathRel
-New-Item "$cfg\Gate" -Force | Out-Null
+if (-not (Test-Path "$cfg\Gate")) { New-Item "$cfg\Gate" | Out-Null }
 Set-KeyAclHard -SubKey "$cfgPathRel\Gate"
 
 # Remember what Auth0 was, including "nothing". The old code stored
@@ -113,7 +157,7 @@ if (-not (Get-ItemProperty $cfg -Name WindowSec -ErrorAction SilentlyContinue)) 
 # --- event source ----------------------------------------------------------
 
 $src = 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\TheAdminCafe Ristretto'
-New-Item $src -Force | Out-Null
+if (-not (Test-Path $src)) { New-Item $src | Out-Null }
 Set-ItemProperty $src -Name EventMessageFile -Value '%SystemRoot%\System32\EventCreate.exe' -Type ExpandString
 Set-ItemProperty $src -Name TypesSupported -Value 7 -Type DWord
 

@@ -6,11 +6,25 @@ $cfg    = 'HKLM:\SOFTWARE\TheAdminCafe\Ristretto'
 $src    = 'HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\TheAdminCafe Ristretto'
 $noPrev = '__none__'
 
-# Restore Auth0 first: if anything below fails, the machine is already back
-# on its original filter rather than half-uninstalled.
+$cur  = (Get-ItemProperty $msvKey -Name Auth0 -ErrorAction SilentlyContinue).Auth0
 $prev = (Get-ItemProperty $cfg -Name PrevAuth0 -ErrorAction SilentlyContinue).PrevAuth0
 
-if ($prev -and $prev -ne $noPrev) {
+# An older install-ristretto.ps1 recorded its own name when it ran twice.
+# Restoring that would leave Ristretto registered, so stop before anything
+# changes and say how to fix the record.
+if ($prev -eq 'RistrettoFilter') {
+    throw "PrevAuth0 under $cfg is 'RistrettoFilter', left by an older install-ristretto.ps1. Set it to what Auth0 was before Ristretto ('TacSubAuth' for Doppio's filter, '$noPrev' for none) and run this again. Nothing was changed."
+}
+
+# Restore Auth0 first: if anything below fails, the machine is already back
+# on its original filter rather than half-uninstalled. Only touch it while it
+# is still ours: if somebody gave the slot to another filter after the
+# install, overwriting it with the old value would undo their change.
+if ($cur -ne 'RistrettoFilter') {
+    $shown = if ($cur) { "'$cur'" } else { '(none)' }
+    Write-Warning "Auth0 is $shown, not 'RistrettoFilter'. Left as it is."
+    $restored = "$shown (unchanged)"
+} elseif ($prev -and $prev -ne $noPrev) {
     Set-ItemProperty $msvKey -Name Auth0 -Value $prev
     $restored = "'$prev'"
 } else {
@@ -32,6 +46,6 @@ Remove-ItemProperty $cfg -Name PrevAuth0 -ErrorAction SilentlyContinue
 Remove-Item $src -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item 'C:\Program Files\TheAdminCafe\ristretto.exe' -Force -ErrorAction SilentlyContinue
 
-Write-Host "Auth0 restored to $restored. Open gates cleared."
+Write-Host "Auth0: $restored. Open gates cleared."
 Write-Host "Reboot, THEN delete $env:SystemRoot\System32\RistrettoFilter.dll"
 Write-Host "(lsass holds the DLL until the machine restarts)."
