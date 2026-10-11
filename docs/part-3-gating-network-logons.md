@@ -110,9 +110,12 @@ check.](images/filter-decision-path.svg)
 
 Four questions, in that order, on every logon MSV1_0 hands the filter. Three of
 them exit to "no objection" and cost one registry read at most; only an
-enrolled account on a network logon ever reaches the gate check. The veto is
-the same `STATUS_ACCOUNT_RESTRICTION` Doppio's filter returns, so from MSV1_0's
-side nothing about the refusal has changed — only the condition in front of it.
+enrolled account on a network logon to this machine ever reaches the gate
+check. A pass-through logon (`MSV1_0_PASSTHRU`) is not to this machine, so the
+filter leaves it alone. The veto is `STATUS_INVALID_WORKSTATION`, the same code
+Doppio's filter returns, so from MSV1_0's side nothing about the refusal has
+changed — only the condition in front of it. In the Security log it is a
+failed 4625 with status `0xC0000070`.
 
 ## One lockout, not two
 
@@ -257,18 +260,20 @@ __try
 {
     result = Decide(UserAll);
 }
-__except (EXCEPTION_EXECUTE_HANDLER)
+__except (DecisionFilter(GetExceptionCode()))
 {
     Report(EVENTLOG_ERROR_TYPE, 303,
            L"Unhandled exception while deciding a network logon - refusing (fail closed).");
-    result = STATUS_ACCOUNT_RESTRICTION;
+    result = STATUS_INVALID_WORKSTATION;
 }
 ```
 
 Catching an access violation and carrying on is normally a bad idea, because
 you do not know what state you are in. Inside lsass the alternative is a
 bugcheck, so refusing one logon and staying up is the better of two bad
-options. It reduces the risk. It does not remove it.
+options. It reduces the risk. It does not remove it. `DecisionFilter` lets a
+stack overflow through: by the time the filter runs, the guard page is gone,
+and carrying on with that thread is worse than the bugcheck.
 
 ### 3. The enrollment check failed open
 
@@ -300,6 +305,12 @@ moment somebody uninstalls Doppio, and a security tool that bricks file sharing
 on removal is a tool people rip out angrily. So a missing index is permissive
 and a broken read is not.
 
+The three outcomes started as a hand copy of the read inside the filter,
+because `store.cpp` also carries DPAPI and account lookups, and those must not
+go into lsass. Doppio's second review moved the index reads into their own
+file, `store_index.cpp`, with the same three outcomes. The filter links that
+file now and calls `tac::EnrollmentByRid`, so the copy is gone.
+
 ### 4. `WindowSec` had no ceiling
 
 The config read accepted any non-zero DWORD:
@@ -325,7 +336,10 @@ going to `OutputDebugStringW` on every allowed SMB connection, an installer
 that stored `PrevAuth0 = 'TacSubAuth'` when there had been no `Auth0` at all
 (so uninstalling pointed lsass at a DLL that was never there), and a config key
 left on inherited permissions while holding the enforcement kill switch. They
-are all in `SECURITY-FIXES.md` in the repo.
+are all in `SECURITY-FIXES.md` in the repo, together with a later round that
+compared the filter with Microsoft's documentation: the veto code above, the
+out-parameters `WhichFields`, `UserFlags` and `Authoritative` set on every
+path, and pass-through logons left alone.
 
 The pattern across all four of the big ones is the same, and it is the same
 lesson as Part 2 from a different angle. Part 2 taught me to check what Windows

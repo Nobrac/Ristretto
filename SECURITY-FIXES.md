@@ -160,16 +160,49 @@ any process can read, and in 4688 audit records and shell history. The code
 is single-use and burned immediately, so the window is small. The argument
 stays for scripted use; the tool now prints a note recommending the prompt.
 
-## 14. Duplicated logic — **documented**
+## 14. Duplicated logic — **one copy removed, one documented**
 
-`EnrollmentOf` duplicates `tac::IsEnrolledByRid`, and `OpenProtected`
-duplicates `store.cpp`'s static `OpenProtectedKey`. The justification holds
-(linking `store.cpp` would drag DPAPI into lsass). The risk is silent drift
-if Doppio changes its enrollment layout or its SDDL — the submodule pin
-catches build breaks, not semantic ones.
+`EnrollmentOf` duplicated `tac::IsEnrolledByRid`, and `OpenProtected`
+duplicates `store.cpp`'s static `OpenProtectedKey`. The justification for the
+first one was that linking `store.cpp` would drag DPAPI into lsass. The risk
+was silent drift if Doppio changed its enrollment layout or its SDDL; the
+submodule pin catches build breaks, not semantic ones.
 
-If you touch either side, check the other. Worth recording the Doppio commit
-the copies were taken from, next to each one.
+Doppio's second review moved the index reads into their own file,
+`store_index.cpp`, with no DPAPI, no account lookups and no heap. The filter
+now links that file and calls `tac::EnrollmentByRid`, which has exactly the
+three outcomes of item 3. `EnrollmentOf` is gone, and with it the copy that
+mattered most: the one that decides inside lsass.
+
+`OpenProtected` stays a copy, now with the Doppio commit it was taken from
+(2776655) next to it. Doppio's `OpenProtectedKey` no longer re-applies the
+ACL to an existing key, because it runs on the logon path; `ristretto.exe` is
+a console tool and keeps the repair. If you touch either side, check the
+other.
+
+## 15. Filter: contract details from the documentation — **fixed**
+
+Doppio's second review compared its filter with the documentation of
+`Msv1_0SubAuthenticationFilter`, and the same three points applied here:
+
+- **Veto code.** The documentation lists the values the function "must
+  return". `STATUS_ACCOUNT_RESTRICTION` is not one of them;
+  `STATUS_INVALID_WORKSTATION` is, and it says what the gate means. A refused
+  logon shows a different error text now; the 4625 in the Security log
+  carries `0xC0000070`.
+- **Out-parameters.** `WhichFields`, `UserFlags` and `Authoritative` are
+  `[out]`, and `Authoritative` "should return valid information regardless of
+  the return value". The filter set it only on a refusal and never touched
+  `UserFlags`. All three are now written on every path, before the first
+  return. `LogoffTime` and `KickoffTime` stay untouched: they carry the
+  account's logon hours.
+- **Pass-through logons.** With `MSV1_0_PASSTHRU` the user "is not connecting
+  to this machine". The enrollment index only knows local RIDs, and a RID
+  from another machine can collide with a local one. The filter now has no
+  objection to pass-through logons.
+
+`tests/` runs the real filter against fakes on Linux and covers all three,
+plus the gate, the window bounds, the kill switch and the fail-closed paths.
 
 ---
 

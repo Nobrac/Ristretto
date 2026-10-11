@@ -6,3 +6,4 @@
 *.dll
 *.exe
 !src/*.def
+tests/test_filter

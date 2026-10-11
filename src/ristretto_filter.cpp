@@ -14,12 +14,16 @@
 // registry read per decision, no DPAPI, no LSA lookups, never touches
 // credential material. Test-VM code: unsigned, needs RunAsPPL off.
 //
-// The RID-index read below duplicates tac::IsEnrolledByRid (store.cpp) on
-// purpose. store.cpp cannot be linked into lsass: it also carries
-// CryptUnprotectData and LookupAccountName/Sid, which store.cpp's own
-// comments ban from the LSA hot path. A few lines copied beats importing
-// DPAPI into the logon path. Keep the two in sync by hand; see
-// SECURITY-FIXES.md, "Duplicated logic".
+// The RID-index read is Doppio's own tac::EnrollmentByRid, from
+// store_index.cpp, linked into this DLL. That file holds nothing but the
+// index reads: no DPAPI, no account lookups, no heap. Earlier versions of
+// this filter copied the read by hand, because it used to live in store.cpp
+// next to CryptUnprotectData and LookupAccountName/Sid, which must not go
+// into lsass. Doppio split the file (commit 37a827d), so the copy is gone and
+// the two can no longer drift apart; see SECURITY-FIXES.md, item 14.
+//
+// The out-parameters and the veto code follow the documentation of
+// Msv1_0SubAuthenticationFilter, like Doppio's filter: see item 15.
 //
 // Registered as:
 //   HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0
@@ -47,13 +51,23 @@
 #include <ntsecapi.h>
 #include <subauth.h>
 
+#include "store.h"      // Doppio: tac::EnrollmentByRid, from store_index.cpp
+
 #pragma comment(lib, "advapi32.lib")
 
 #ifndef STATUS_SUCCESS
 #define STATUS_SUCCESS             ((NTSTATUS)0x00000000L)
 #endif
-#ifndef STATUS_ACCOUNT_RESTRICTION
-#define STATUS_ACCOUNT_RESTRICTION ((NTSTATUS)0xC000006EL)
+// The documentation of Msv1_0SubAuthenticationFilter lists the values the
+// function "must return". STATUS_ACCOUNT_RESTRICTION, which this filter used
+// to veto with, is not among them; STATUS_INVALID_WORKSTATION is, and it says
+// what we mean: this account may not log on over this path right now.
+#ifndef STATUS_INVALID_WORKSTATION
+#define STATUS_INVALID_WORKSTATION ((NTSTATUS)0xC0000070L)
+#endif
+
+#ifndef MSV1_0_PASSTHRU
+#define MSV1_0_PASSTHRU            0x01
 #endif
 
 // Writing to the event log from lsass is an RPC to the eventlog service;
@@ -67,7 +81,6 @@
 
 namespace
 {
-    const wchar_t kDoppioRids[] = L"SOFTWARE\\TheAdminCafe\\2FA\\Rids";
     const wchar_t kGatePath[]   = L"SOFTWARE\\TheAdminCafe\\Ristretto\\Gate";
     const wchar_t kConfigPath[] = L"SOFTWARE\\TheAdminCafe\\Ristretto";
 
@@ -189,37 +202,16 @@ namespace
     }
 
     // ---- enrollment ----------------------------------------------------
-    // Behavioral copy of tac::IsEnrolledByRid (store.cpp). Presence only,
-    // no secret material.
+    // tac::EnrollmentByRid (Doppio, store_index.cpp) has the three outcomes
+    // this filter needs, with exactly the semantics the old hand copy had:
     //
-    // The original collapsed every failure into "not enrolled", which is
-    // fail-OPEN: one unexpected registry error and an enrolled account walks
-    // straight past the gate. Three outcomes now, so the caller can tell
-    // "Doppio is not installed" (nothing to enforce, allow) apart from
-    // "this read went wrong" (refuse this one account).
-    enum class Enroll { No, Yes, Unknown };
-
-    Enroll EnrollmentOf(ULONG rid)
-    {
-        if (!rid) return Enroll::No;
-
-        HKEY k = nullptr;
-        LSTATUS st = RegOpenKeyExW(HKEY_LOCAL_MACHINE, kDoppioRids, 0, KEY_QUERY_VALUE, &k);
-        if (st == ERROR_FILE_NOT_FOUND)
-            return Enroll::No;          // no Doppio index at all -> nothing of ours
-        if (st != ERROR_SUCCESS)
-            return Enroll::Unknown;
-
-        WCHAR value[12] = {};
-        RidToValueName(rid, value);
-
-        st = RegQueryValueExW(k, value, nullptr, nullptr, nullptr, nullptr);
-        RegCloseKey(k);
-
-        if (st == ERROR_SUCCESS)        return Enroll::Yes;
-        if (st == ERROR_FILE_NOT_FOUND) return Enroll::No;
-        return Enroll::Unknown;
-    }
+    //   Rids key absent        -> No       Doppio is not installed: allow
+    //   value absent           -> No       genuinely not enrolled: allow
+    //   any other read error   -> Unknown  refuse this one account
+    //
+    // Keeping "key absent" permissive is deliberate (SECURITY-FIXES.md, item
+    // 3): failing closed there would deny every network logon on the machine
+    // the moment Doppio is uninstalled.
 
     // ---- gate ----------------------------------------------------------
     bool GateFresh(ULONG rid, ULONG& ageSec)
@@ -349,18 +341,18 @@ namespace
         WCHAR name[129];
         SamName(UserAll, name);
 
-        switch (EnrollmentOf(rid))
+        switch (tac::EnrollmentByRid(rid))
         {
-        case Enroll::No:
+        case tac::Enrollment::No:
             return STATUS_SUCCESS;          // not enrolled: not our business
 
-        case Enroll::Unknown:
+        case tac::Enrollment::Unknown:
             // The index is there but this read failed. Do not guess "not
             // enrolled" - that is the one wrong answer that opens the gate.
             ReportVeto(rid, name, 0, L"the enrollment index could not be read");
-            return STATUS_ACCOUNT_RESTRICTION;
+            return STATUS_INVALID_WORKSTATION;
 
-        case Enroll::Yes:
+        case tac::Enrollment::Yes:
         default:
             break;
         }
@@ -384,33 +376,56 @@ namespace
         }
 
         ReportVeto(rid, name, age, L"no fresh gate");
-        return STATUS_ACCOUNT_RESTRICTION;
+        return STATUS_INVALID_WORKSTATION;
     }
 }
 
+// The documentation calls WhichFields, UserFlags, Authoritative, LogoffTime
+// and KickoffTime [out]. The three we can answer for are written on every
+// path, before anything can return:
+//
+//   * WhichFields = 0: nothing to write back to the SAM.
+//   * UserFlags   = 0: we claim neither LOGON_GUEST nor LOGON_NOENCRYPTION.
+//   * Authoritative = TRUE: the documentation says it "should return valid
+//     information regardless of the return value". Earlier versions left it
+//     as MSV1_0 passed it in unless they refused. For a local account there
+//     is no other domain controller to ask, so our answer is final either
+//     way.
+//
+// LogoffTime and KickoffTime stay untouched: they carry the account's logon
+// hours, and a gate has no business extending them. Doppio's filter logs the
+// incoming values for the VM test; this one stays quiet on allowed logons.
 NTSTATUS NTAPI Msv1_0SubAuthenticationFilter(
     NETLOGON_LOGON_INFO_CLASS LogonLevel,
     PVOID /*LogonInformation*/,            // challenge/response - never read
-    ULONG /*Flags*/,
+    ULONG Flags,
     PUSER_ALL_INFORMATION UserAll,         // hashes live here too - never read
     PULONG WhichFields,
-    PULONG /*UserFlags*/,
+    PULONG UserFlags,
     PBOOLEAN Authoritative,
     PLARGE_INTEGER /*LogoffTime*/,         // account logon hours - not ours
     PLARGE_INTEGER /*KickoffTime*/)
 {
     if (WhichFields)
         *WhichFields = 0;
+    if (UserFlags)
+        *UserFlags = 0;
+    if (Authoritative)
+        *Authoritative = TRUE;
 
     const bool isNetwork = (LogonLevel == NetlogonNetworkInformation ||
                             LogonLevel == NetlogonNetworkTransitiveInformation);
 
-    // Anything that is not a network logon is out of scope, including the
-    // interactive path Doppio's credential provider already owns. Leave
-    // *Authoritative as MSV1_0 passed it in there: we have no opinion.
-    // (FALSE would let the request be retried on another domain controller;
-    // a refusal below sets TRUE so it stays final.)
-    if (!isNetwork)
+    // MSV1_0_PASSTHRU: "the user is not connecting to this machine". The
+    // enrollment index only knows the RIDs of local accounts, and a RID from
+    // another machine can be the same number as a local one, so a pass-through
+    // logon is not ours to gate.
+    const bool passthru = (Flags & MSV1_0_PASSTHRU) != 0;
+
+    // Anything that is not a network logon to this machine is out of scope,
+    // including the interactive path Doppio's credential provider already
+    // owns.
+    if (!isNetwork || passthru)
         return STATUS_SUCCESS;
 
     NTSTATUS result;
@@ -427,11 +442,8 @@ NTSTATUS NTAPI Msv1_0SubAuthenticationFilter(
     {
         Report(EVENTLOG_ERROR_TYPE, 303,
                L"Unhandled exception while deciding a network logon - refusing (fail closed).");
-        result = STATUS_ACCOUNT_RESTRICTION;
+        result = STATUS_INVALID_WORKSTATION;
     }
-
-    if (result != STATUS_SUCCESS && Authoritative)
-        *Authoritative = TRUE;
 
     return result;
 }

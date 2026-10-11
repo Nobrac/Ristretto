@@ -25,18 +25,21 @@ rem (C28301, a PNTSTATUS annotation mismatch between bcrypt.h and ntsecapi.h).
 rem So analysis runs afterwards, advisory, and its findings do not stop the
 rem build. Read them; do not ignore them.
 
+rem The filter links one file of Doppio's: store_index.cpp, the enrollment
+rem index reads. It holds no DPAPI and no account lookups, so it is safe in
+rem lsass; store.cpp, with both, stays out of this DLL.
 cl /nologo /LD /MT /O2 /guard:cf /Qspectre /EHsc /std:c++17 /W4 /WX /sdl ^
    /DUNICODE /D_UNICODE ^
-   src\ristretto_filter.cpp /Fe:RistrettoFilter.dll ^
-   /link /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
+   /I%DOPPIO% src\ristretto_filter.cpp %DOPPIO%\store_index.cpp /Fe:RistrettoFilter.dll ^
+   /link /guard:cf /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
    /DEF:src\RistrettoFilter.def advapi32.lib
 if errorlevel 1 goto :fail
 
 cl /nologo /MT /O2 /guard:cf /Qspectre /EHsc /std:c++17 /W4 /WX /sdl ^
    /DUNICODE /D_UNICODE ^
    /I%DOPPIO% src\ristretto.cpp %DOPPIO%\totp.cpp %DOPPIO%\store.cpp ^
-   %DOPPIO%\verify.cpp %DOPPIO%\statelock.cpp /Fe:ristretto.exe ^
-   /link /guard:cf /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
+   %DOPPIO%\store_index.cpp %DOPPIO%\verify.cpp %DOPPIO%\statelock.cpp /Fe:ristretto.exe ^
+   /link /guard:cf /CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA ^
    bcrypt.lib crypt32.lib advapi32.lib
 if errorlevel 1 goto :fail
 
