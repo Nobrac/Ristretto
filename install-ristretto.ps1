@@ -1,4 +1,12 @@
 #requires -RunAsAdministrator
+param(
+    # Skips the confirmation below, for a caller that has already asked.
+    # Barista passes it: it runs this through powershell.exe -NonInteractive,
+    # where Read-Host cannot prompt and throws instead, so without this the
+    # install never gets past the question. Run the script by hand and leave
+    # the switch off to get the prompt.
+    [switch]$Confirmed
+)
 $ErrorActionPreference = 'Stop'
 
 # ---------------------------------------------------------------------------
@@ -64,8 +72,21 @@ if ($cur -and $cur -notin @('TacSubAuth', 'RistrettoFilter')) {
 Write-Host ""
 Write-Host "About to put an unsigned DLL in the lsass logon path on this machine." -ForegroundColor Yellow
 Write-Host "If it faults, this box may not boot cleanly. Snapshot taken?" -ForegroundColor Yellow
-$answer = Read-Host "Type YES to continue"
-if ($answer -cne 'YES') { Write-Host "Aborted. Nothing changed."; return }
+
+if ($Confirmed) {
+    # The two warnings above are printed either way, so they are in the
+    # caller's log next to whatever it asked its own user.
+    Write-Host "Confirmed by the caller (-Confirmed)."
+} else {
+    try {
+        $answer = Read-Host "Type YES to continue"
+    } catch {
+        # -NonInteractive without -Confirmed. The raw error from Read-Host
+        # says nothing about how to get past it.
+        throw "No interactive console for the confirmation. Run this in a normal PowerShell window, or pass -Confirmed if the caller has already asked."
+    }
+    if ($answer -cne 'YES') { Write-Host "Aborted. Nothing changed."; return }
+}
 
 # --- config key, hardened before anything is written into it ---------------
 
