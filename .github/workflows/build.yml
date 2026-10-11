@@ -21,12 +21,22 @@ jobs:
       # proves it compiles and exports the one symbol, no more than that.
       - name: Check the filter exports exactly one symbol
         shell: pwsh
+        # dumpbin returns an array of lines, and -match/-notmatch on an array
+        # filters it instead of returning true/false. The old check
+        # ($out -notmatch 'name') returned every line without the name, which
+        # is never empty, so it threw on every run. Parse the export table
+        # line by line instead: ordinal, hint, RVA, name.
         run: |
           $out = & dumpbin /exports RistrettoFilter.dll
-          if ($out -notmatch 'Msv1_0SubAuthenticationFilter') {
-            throw "RistrettoFilter.dll does not export Msv1_0SubAuthenticationFilter"
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed with exit code $LASTEXITCODE" }
+          $exports = @(foreach ($line in $out) {
+            if ($line -match '^\s+\d+\s+[0-9A-Fa-f]+\s+[0-9A-Fa-f]{8}\s+(\S+)') { $Matches[1] }
+          })
+          Write-Host "Exports: $($exports -join ', ')"
+          if ($exports.Count -ne 1 -or $exports[0] -ne 'Msv1_0SubAuthenticationFilter') {
+            throw "RistrettoFilter.dll must export exactly Msv1_0SubAuthenticationFilter, found: $($exports -join ', ')"
           }
-          Write-Host "Export present."
+          Write-Host "Export present, and it is the only one."
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
