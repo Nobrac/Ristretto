@@ -87,8 +87,8 @@ int main()
     CHECK(r.status == kSuccess && Sane(r));                 // not this machine
     r = Call(NetlogonNetworkInformation, 0, 1002, L"bob");
     CHECK(r.status == kSuccess && Sane(r));                 // not enrolled
-    r = Call(NetlogonNetworkInformation, 0, 1001, L"", true);
-    CHECK(r.status == kSuccess && Sane(r));                 // no SAM record
+    r = Call(NetlogonInteractiveInformation, 0, 1001, L"", true);
+    CHECK(r.status == kSuccess && Sane(r));                 // no SAM record, not network
 
     std::printf("-- the gate\n");
     r = Call(NetlogonNetworkInformation, 0, 1001);
@@ -123,6 +123,7 @@ int main()
     CHECK(Call(NetlogonNetworkInformation, 0, 1001).status == kVeto);
     Config(L"Mode", 0);                                     // kill switch
     CHECK(Call(NetlogonNetworkInformation, 0, 1001).status == kSuccess);
+    CHECK(Call(NetlogonNetworkInformation, 0, 1001, L"", true).status == kSuccess);
     Config(L"Mode", 1);
     CHECK(Call(NetlogonNetworkInformation, 0, 1001).status == kVeto);
     rt::values.erase({ kConfig, L"Mode" });
@@ -130,6 +131,9 @@ int main()
     CHECK(Call(NetlogonNetworkInformation, 0, 1001).status == kVeto);   // missing Mode keeps enforcing
 
     std::printf("-- fail closed\n");
+    r = Call(NetlogonNetworkInformation, 0, 1001, L"", true);
+    CHECK(r.status == kVeto && Sane(r));                    // no SAM record
+    CHECK(fake::DebugContains(L"no SAM record"));
     fake::keys.erase(kRids);
     CHECK(Call(NetlogonNetworkInformation, 0, 1001).status == kSuccess); // Doppio not installed
     fake::keys[kRids] = { L"1001" };
