@@ -328,13 +328,20 @@ namespace
     // that need unwinding in the same frame.
     NTSTATUS Decide(PUSER_ALL_INFORMATION UserAll)
     {
-        if (!UserAll)
-            return STATUS_SUCCESS;          // nothing to judge
-
         ReadConfigThrottled();
 
         if (!InterlockedCompareExchange(&g_enforce, 0, 0))
             return STATUS_SUCCESS;          // kill switch
+
+        // No SAM record, no RID, no way to tell whether the account is
+        // enrolled. "I couldn't tell" must not come out as "yes".
+        if (!UserAll)
+        {
+            Report(EVENTLOG_WARNING_TYPE, 301,
+                   L"Refused a network logon: MSV1_0 passed no SAM record, so the "
+                   L"account could not be identified.");
+            return STATUS_INVALID_WORKSTATION;
+        }
 
         const ULONG rid = UserAll->UserId;
 

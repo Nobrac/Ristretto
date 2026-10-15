@@ -252,6 +252,17 @@ A review of Part 3 against the code and the documentation found these:
 - **The uninstaller overwrote `Auth0` unchecked (low).** It now only restores
   the slot while it still says `RistrettoFilter`, and warns otherwise.
 
+## 17. Filter: a missing SAM record was fail-**open** — **fixed**
+
+`Decide()` started with `if (!UserAll) return STATUS_SUCCESS;`. Without the
+SAM record there is no RID, so the filter cannot tell whether the account is
+enrolled, and it answered "no objection". That is the one answer section 3
+rules out. MSV1_0 should pass the record for every network logon to a local
+account, so this is unlikely to be reachable (not verified on a live lsass),
+but the code now refuses the logon (event 301) when the kill switch is on.
+With `Mode = 0` it still allows, like every other path. Doppio's `TacSubAuth`
+had the same line and got the same fix.
+
 ---
 
 ## Before you deploy this anywhere real
