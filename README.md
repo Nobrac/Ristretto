@@ -1,17 +1,16 @@
 # Ristretto
 
-**TOTP-gated network logons for local Windows accounts.** Doppio watches the
-logon screen; Ristretto decides who may come in over the network — SMB, RPC,
-WinRM over NTLM.
+TOTP-gated network logons (SMB, RPC, WinRM over NTLM) for local Windows
+accounts.
 
-Ristretto is a companion to [Doppio](https://github.com/Nobrac/Doppio), not a
-patch. It requires Doppio to be installed and enrolled. It reads Doppio's RID
-enrollment index read-only and verifies one-time codes through Doppio's own
-`verify.cpp`, linked unmodified. No code changes to Doppio, no second secret
-store, no second enrollment.
+Ristretto is a companion to [Doppio](https://github.com/Nobrac/Doppio) and
+requires Doppio to be installed and enrolled. It reads Doppio's RID enrollment
+index read-only and verifies codes through Doppio's own `verify.cpp`, linked
+unmodified. Doppio needs no code changes, and there is no second secret store
+or enrollment.
 
-Blog series at <https://theadmincafe.ch>: Part 1 (credential provider),
-Part 2 (inside LSA), Part 3 (this), at
+Blog series at <https://theadmincafe.ch>: Part 1 (credential provider), Part 2
+(inside LSA), Part 3 (this project):
 <https://theadmincafe.ch/p/windows-2fa-gating-network-logons/>.
 
 > **Test-VM code.** Unsigned, needs `RunAsPPL` off, runs inside `lsass.exe`.
@@ -19,19 +18,15 @@ Part 2 (inside LSA), Part 3 (this), at
 > BitLocker recovery key within reach, and a practised way to edit the
 > registry offline from WinRE.
 
-## Why it exists
+## What it does
 
-Doppio's filter (Part 2) flatly denies network logons for enrolled accounts —
-correct, but it means an enrolled account can never map a share, never use
-WinRM, and RDP with NLA stops working for it. The second factor made the
-account safer by making it useless.
-
-A real second factor per SMB connection is impossible: NTLMv2 is
-challenge/response, the password never crosses the wire, and there is no
-round trip in the handshake where a server can ask for a code. So Ristretto
-uses the **gate pattern** instead: prove your TOTP once, get a time window,
-network logons pass while the window is open. Same idea as Duo's remembered
-sessions, minus the cloud.
+Doppio's filter (Part 2) denies all network logons for enrolled accounts, so
+an enrolled account cannot map a share or use WinRM, and RDP with NLA stops
+working for it. NTLMv2 has no round trip where a server could ask for a code,
+so a second factor per SMB connection is impossible. Ristretto uses a gate
+instead: you prove your TOTP once, which opens a time window, and network
+logons for that account pass until it closes. Duo's remembered sessions work
+the same way, without the cloud.
 
 ```
 ristretto alice            →  TOTP checked, timestamp written
@@ -40,33 +35,26 @@ net use \\host\share       →  filter sees a fresh gate, no objection
 net use \\host\share       →  gate stale, STATUS_INVALID_WORKSTATION
 ```
 
-## Read this before you decide it is what you want
+## Limits
 
-Ristretto is **not** a security improvement over Doppio's filter. It is a
-controlled loosening of it. Three limits decide whether it is any use to you:
+Ristretto is a controlled loosening of Doppio's filter. Three limits decide
+whether it is any use to you:
 
-1. **The window is account-wide, not connection-wide.** While a gate is open,
-   anyone who can authenticate as that account gets in — not only the person
-   who opened it. Password holders, pass-the-hash, a well-timed relay. The
-   gate proves somebody with the phone was at this machine recently. It does
-   not prove anything about the connection in front of it.
+1. The window covers the whole account. While a gate is open, anyone who can
+   authenticate as that account gets in: password holders, pass-the-hash, a
+   well-timed relay. The gate only shows that someone with the phone was at
+   this machine recently.
+2. You open the gate on the machine it protects, from an elevated session. On
+   a headless server that is a deadlock, and an unattended 03:00 backup job
+   has nobody to open a gate for it. It fits the case where you already have
+   console access and want network access from a second machine for a while.
+3. `RunAsPPL` has to be off so Windows loads the unsigned DLL. That also lets
+   credential-dumping tools read passwords out of lsass memory. On a machine
+   that matters, this is probably a net loss.
 
-2. **The gate is opened on the machine it protects, elevated.** You need an
-   interactive session on the box to unlock network access *to* the box. On a
-   headless server that is a deadlock. An unattended backup job at 03:00
-   arrives as a network logon with nobody awake to open a gate for it. What is
-   left is the case where you already have console access and want network
-   access from a second machine for a while.
-
-3. **`RunAsPPL` has to be off.** That is what lets Windows load the unsigned
-   DLL, and it is also what stops credential-dumping tools reading passwords
-   out of lsass memory. On a machine that matters, that trade is probably a
-   net loss.
-
-If you just need one account to reach a share, the boring answer is usually
-better: a **separate, non-enrolled account** for network access with minimal
-rights and a long random password. No code in lsass, no `RunAsPPL` off. The
-account at the logon screen stays fully protected by Doppio.
+If one account needs to reach a share, a separate non-enrolled account with
+minimal rights and a long random password is usually the better answer. It
+needs no code in lsass and leaves `RunAsPPL` on.
 
 ## How it works
 
@@ -75,8 +63,8 @@ account at the logon screen stays fully protected by Doppio.
 | `RistrettoFilter.dll` | `lsass.exe`, MSV1_0 `Auth0` slot | Vetoes a network logon for an enrolled account unless its gate is fresh |
 | `ristretto.exe` | an elevated console | Checks a TOTP through Doppio's `verify.cpp` and writes the gate timestamp |
 
-The filter asks four questions per logon, in this order, and three of them
-exit to "no objection" at the cost of one registry read at most:
+The filter checks each logon in this order; the first three exits cost at most
+one registry read:
 
 ```
 network logon to this machine? → no  → no objection   (pass-through counts as no)
@@ -85,40 +73,31 @@ enrolled (RID)?                → no  → no objection   (unreadable index → 
 gate fresh?                    → no  → veto
 ```
 
-The veto is `STATUS_INVALID_WORKSTATION`, the same code Doppio's filter
-returns, so from MSV1_0's side nothing about the refusal changed — only the
-condition in front of it. In the Security log a refusal is a failed 4625.
-MSV1_0 reports `STATUS_INVALID_WORKSTATION` as the sub-status of an account
-restriction, so expect Sub Status `0xC0000070`, most likely under Status
-`0xC000006E`; check both fields in the VM. `WhichFields`, `UserFlags` and `Authoritative` are
-written on every path, as the documentation of
-`Msv1_0SubAuthenticationFilter` asks; `SECURITY-FIXES.md`, item 15, has the
-details.
-
-The enrollment check is Doppio's own `tac::EnrollmentByRid` from
-`store_index.cpp`, linked into the DLL. That file holds the index reads and
-nothing else: no DPAPI, no account lookups, no heap.
-
-### One lockout, not two
+The veto is `STATUS_INVALID_WORKSTATION`, the code Doppio's filter returns. In
+the Security log a refusal is a failed 4625; expect Sub Status `0xC0000070`,
+most likely under Status `0xC000006E` (check both fields in the VM).
+`WhichFields`, `UserFlags` and `Authoritative` are written on every path, see
+`SECURITY-FIXES.md`, item 15. The enrollment check is Doppio's
+`tac::EnrollmentByRid` from `store_index.cpp`, which only reads the index (no
+DPAPI, account lookups or heap).
 
 `ristretto.exe` links Doppio's `totp.cpp`, `store.cpp`, `store_index.cpp`,
-`verify.cpp` and `statelock.cpp` **unmodified**, as a pinned submodule. That is not laziness —
-it is the only way the lockout stays honest. A separate failure counter would
-give an attacker two independent sets of guesses against the same secret.
-
-Sharing `verify.cpp` means one counter, one `lastStep`, one state file: five
-wrong codes lock the account whether they were typed at the tile or at the
-gate, a code burned at one is `Replayed` at the other, and while the account
-is locked the code is not even checked.
+`verify.cpp` and `statelock.cpp` unmodified, from a pinned submodule, so the
+tile and the gate share one failure counter, one `lastStep` and one state
+file. Five wrong codes lock the account wherever they were typed, a code used
+at one is `Replayed` at the other, and a locked account's code is not checked.
+A separate counter would give an attacker a second set of guesses.
 
 > **`ristretto.exe` must sit in the same folder as `TacProvider.dll`.**
-> Doppio's `StateLock` builds its lock file path from the calling module's own
-> directory. Somewhere else means a second lock file, which means the tile and
-> the gate can write the state at the same time, which means the shared counter
-> is no longer shared. The installer puts it in
-> `C:\Program Files\TheAdminCafe\` for exactly this reason.
+> Doppio's `StateLock` builds its lock file path from the calling module's
+> directory. Anywhere else gives a second lock file, the tile and the gate can
+> then write the state at the same time, and the counter is no longer shared.
+> The installer puts it in `C:\Program Files\TheAdminCafe\`.
 
 ## Build
+
+From the x64 Native Tools Command Prompt (a plain `cmd` has neither `cl.exe`
+nor the SDK headers on the PATH):
 
 ```text
 git clone https://github.com/Nobrac/Ristretto
@@ -127,50 +106,41 @@ git submodule update --init --recursive
 build-ristretto.bat
 ```
 
-From the **x64 Native Tools Command Prompt** — a plain `cmd` has neither
-`cl.exe` nor the SDK headers on the PATH.
-
 The filter is built with `/MT /O2 /guard:cf /Qspectre /W4 /WX /sdl` and
-linked `/CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA`. `/WX` is
-deliberate: a new warning in code that lives inside lsass should fail the
-build, not ship. `/analyze` runs as a second, advisory pass.
+linked `/CETCOMPAT /DYNAMICBASE /NXCOMPAT /HIGHENTROPYVA`. `/WX` makes a new
+warning in lsass code fail the build. `/analyze` runs as a second, advisory
+pass.
 
-### Tests
+Tests (Linux, g++, ASan and UBSan; CI runs them on every push) compile the
+real filter against fakes for the registry, clock and debugger output. They
+cannot show how MSV1_0 really calls the filter, and SEH is mapped to
+`try`/`catch`.
 
 ```text
 make -C tests
 ```
 
-On Linux with g++, under AddressSanitizer and UBSan. The test compiles the
-real `src/ristretto_filter.cpp` and Doppio's `store_index.cpp` against fakes
-for the registry, the clock and the debugger output, and calls the exported
-function the way MSV1_0 would: scope, pass-through, the gate and its edges,
-the window bounds, the kill switch, the fail-closed paths and the
-out-parameters. It cannot show how MSV1_0 really calls the filter, and SEH is
-mapped to `try`/`catch`. CI runs it on every push.
-
 ## Install
 
-Doppio has to be installed and enrolled first, with `enroll /reindex` run at
-least once so the RID index exists. The installer refuses without it.
+Install and enroll Doppio first, and run `enroll /reindex` at least once so
+the RID index exists. The installer refuses without it.
 
 ```powershell
 .\install-ristretto.ps1
 ```
 
-It checks that Doppio is there, that the machine is not a domain controller,
-that LSA protection is off (`RunAsPPL`, `RunAsPPLBoot` and WinInit event 12
-since the last boot), and that `Auth0` belongs to `TacSubAuth` or to nobody —
-it will not take the slot from another product's filter. It saves what was
-there, hardens the config and gate keys before writing anything into them,
-copies `RistrettoFilter.dll` to System32, puts `ristretto.exe` next to
-`TacProvider.dll`, and sets `Auth0` last, once the DLL is actually on disk. It
-asks you to confirm first. Reboot to load it.
+The installer checks that Doppio is present, the machine is not a domain
+controller, LSA protection is off (`RunAsPPL`, `RunAsPPLBoot` and WinInit
+event 12 since the last boot), and `Auth0` is empty or belongs to
+`TacSubAuth`. It will not take the slot from another product's filter. After
+you confirm, it saves the previous `Auth0`, hardens the registry keys before
+writing to them, copies `RistrettoFilter.dll` to System32, puts
+`ristretto.exe` next to `TacProvider.dll`, and sets `Auth0` last. Reboot to
+load the filter.
 
-Running it a second time keeps the config, the open gates and the record of
-what `Auth0` was. An older version lost all three on a second run and then
-recorded `RistrettoFilter` as the filter to restore; both scripts now refuse
-to go on while `PrevAuth0` says `RistrettoFilter` and tell you how to fix it.
+A second run keeps the config, open gates and saved `Auth0`. If `PrevAuth0`
+says `RistrettoFilter` (left behind by an older version), both scripts refuse
+to continue and tell you how to fix it.
 
 ```text
 ristretto <user> [code]     open the network gate (TOTP check)
@@ -181,20 +151,19 @@ ristretto /window <sec>     gate lifetime, 30-3600 (default 300)
 ristretto /mode gate|off    enforcement kill switch, no reboot
 ```
 
-Closing a gate, by hand or when the window runs out, stops new logons only.
-A share mapped or a WinRM session opened inside the window stays up until it
-disconnects; `Close-SmbSession` on the protected machine ends SMB sessions.
+Closing a gate stops new logons only. A share or WinRM session opened inside
+the window stays up until it disconnects; `Close-SmbSession` on the protected
+machine ends SMB sessions.
 
-Pass the code as an argument only in a script — it ends up in the command
-line, in your shell history and, with command-line process auditing on, in
-4688 records. The tool says so when
-you do it.
+Pass the code as an argument only in a script. It ends up in the command
+line, your shell history and, with command-line process auditing on, 4688
+records. The tool warns you when you do it.
 
-**First thing to check in the VM:** attach a kernel debugger and watch for
+First thing to check in the VM: attach a kernel debugger and look for
 `[Ristretto]` lines on a network logon. Microsoft documents `Auth0` for domain
 controllers; whether MSV1_0 calls it for local accounts on a workstation is
-the open question from Part 2. No lines means the filter is loaded and never
-asked, and the gate is decorative.
+the open question from Part 2. If no lines appear, the filter is loaded but
+never called and the gate does nothing.
 
 ## Uninstall
 
@@ -202,11 +171,10 @@ asked, and the gate is decorative.
 .\uninstall-ristretto.ps1
 ```
 
-Then reboot, and only **then** delete `RistrettoFilter.dll` from System32 —
-lsass holds it until the machine restarts. The script restores `Auth0` first,
-so a failure halfway through leaves the machine on Doppio's filter rather than
-on nothing. Open gates are cleared so a later reinstall cannot find a stale
-timestamp still inside its window.
+Reboot, and only then delete `RistrettoFilter.dll` from System32; lsass holds
+it until restart. The script restores `Auth0` first, so a failure halfway
+leaves the machine on Doppio's filter. It also clears open gates so a later
+reinstall cannot find a stale timestamp still inside its window.
 
 ## Registry
 
@@ -214,12 +182,12 @@ timestamp still inside its window.
 |---|---|
 | `HKLM\SOFTWARE\TheAdminCafe\Ristretto` | `Mode` (kill switch), `WindowSec`, `PrevAuth0` |
 | `HKLM\SOFTWARE\TheAdminCafe\Ristretto\Gate` | one `REG_QWORD` per RID: the unix time its gate was opened |
-| `HKLM\SOFTWARE\TheAdminCafe\2FA\Rids` | Doppio's enrollment index — **read-only to Ristretto** |
+| `HKLM\SOFTWARE\TheAdminCafe\2FA\Rids` | Doppio's enrollment index, read-only to Ristretto |
 | `HKLM\SYSTEM\CurrentControlSet\Control\Lsa\MSV1_0` | `Auth0` = `RistrettoFilter` |
 
-Both Ristretto keys get `D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)` — SYSTEM and
-Administrators only, inheritance blocked — applied at install time, before any
-value is written into them.
+Both Ristretto keys get `D:P(A;OICI;KA;;;SY)(A;OICI;KA;;;BA)` (SYSTEM and
+Administrators only, inheritance blocked) at install time, before any value
+is written.
 
 ## Layout
 
@@ -236,9 +204,8 @@ docs/                       a pointer to the blog article
 extern/                     the pinned Doppio submodule
 ```
 
-`SECURITY-FIXES.md` is worth reading even if you never install this. Four of
-the findings were real bugs in the first draft, three of them copied from code
-that was safe where it came from.
+Four of the findings in `SECURITY-FIXES.md` were real bugs in the first
+draft, three of them copied from code that was safe where it came from.
 
 ## Licence
 
